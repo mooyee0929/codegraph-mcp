@@ -1,0 +1,65 @@
+[project]
+name = "codegraph-mcp"
+version = "0.1.0"
+description = "A code knowledge graph and MCP server: index a repo once, then ask structural questions instead of grepping."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { file = "LICENSE" }
+authors = [{ name = "mooyee0929" }]
+keywords = ["mcp", "code-graph", "static-analysis", "code-review", "tree-sitter"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development :: Quality Assurance",
+]
+dependencies = [
+    "mcp>=2.0",
+    "tree-sitter>=0.23.0",
+    "tree-sitter-javascript>=0.23.0",
+    "tree-sitter-typescript>=0.23.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.24",
+    "mypy>=1.13",
+    "ruff>=0.8",
+]
+
+[project.scripts]
+codegraph = "codegraph.cli:main"
+codegraph-mcp = "codegraph.server:main"
+
+[project.urls]
+Homepage = "https://github.com/mooyee0929/codegraph-mcp"
+Issues = "https://github.com/mooyee0929/codegraph-mcp/issues"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["codegraph"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+norecursedirs = ["fixtures", ".venv"]
+asyncio_mode = "auto"
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+extend-exclude = ["tests/fixtures"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+warn_unreachable = true
+disallow_any_explicit = true

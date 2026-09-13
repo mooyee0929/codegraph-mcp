@@ -1,0 +1,19 @@
+# codegraph's own database
+.codegraph/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.venv/
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+uv.lock
+
+# editors / OS
+.vscode/
+.idea/
+.DS_Store
