@@ -30,6 +30,8 @@ Requires Python 3.11+.
 
 ```bash
 codegraph index                       # build or refresh .codegraph/graph.db (incremental)
+codegraph index --force               # re-parse unchanged files too
+codegraph status                      # row counts and database location
 codegraph search "invoice total"      # keyword search over names, signatures, docstrings
 codegraph query callers_of Invoice.total
 codegraph query tests_for pkg.billing.charge
@@ -39,9 +41,11 @@ codegraph review --base main --context
 codegraph arch                        # languages, hubs, entry points, orphans, external deps
 codegraph dead                        # callables nothing references
 codegraph show charge                 # print a symbol's source with line numbers
+codegraph serve                       # run the MCP server (same as codegraph-mcp)
 ```
 
-Every command accepts `--root <dir>` (default: cwd) and `--json`.
+Every subcommand accepts `--json`. To work on another repository, pass `--root <dir>`
+(default: cwd) before the subcommand: `codegraph --root ../other-repo index`.
 
 Targets can be a full qname (`pkg.billing.Invoice.total`), a bare name when it is unique
 in the repo (`total`), a suffix (`Invoice.total`), or a location (`pkg/billing.py:10`).
@@ -52,7 +56,8 @@ Query patterns: `callers_of`, `callees_of`, `imports_of`, `imported_by`, `tests_
 ## MCP server
 
 ```bash
-codegraph-mcp --root /path/to/repo     # stdio transport
+codegraph-mcp --root /path/to/repo     # stdio transport (default)
+codegraph-mcp --root /path/to/repo --transport streamable-http   # or: sse
 ```
 
 Claude Code:
@@ -113,6 +118,16 @@ fan-out, large hunks. It is meant to order your attention, not to judge the chan
 
 **Incremental indexing** hashes file contents; unchanged files are skipped, deleted files
 are removed, and the link pass re-runs only when something changed.
+
+| Module | Role |
+| --- | --- |
+| `codegraph/parsers/` | `python_parser.py` (ast) and `js_parser.py` (tree-sitter) emit nodes and edges per file |
+| `codegraph/indexer.py` | Walks the repo, hashes files, re-parses only what changed |
+| `codegraph/linker.py` | Resolves bare-name edges and infers `tests` edges |
+| `codegraph/store.py` | SQLite + FTS5 storage at `.codegraph/graph.db` |
+| `codegraph/queries.py` | Relationship patterns, impact radius, architecture overview, dead code |
+| `codegraph/review.py` | Git diff → risk-ranked touched symbols plus review context |
+| `codegraph/cli.py`, `codegraph/server.py` | `codegraph` CLI and `codegraph-mcp` server |
 
 ## Limits
 
