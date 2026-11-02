@@ -12,6 +12,7 @@ from codegraph.indexer import (
     iter_source_files,
     load_ignore_file,
 )
+from codegraph.linker import link
 from codegraph.models import Edge
 from codegraph.parsers import language_of
 from codegraph.passes import GraphPass, discover_passes
@@ -155,3 +156,27 @@ def test_db_api_method_calls_are_not_linked_to_a_unique_definition(tmp_path: Pat
         callees = {e.dst for e in store.edges_from("db.count", "calls")}
     assert "query.execute" not in callees
     assert "*.execute" in callees
+
+
+def test_linker_leaves_non_code_targets_alone(tmp_path: Path) -> None:
+    (tmp_path / "fmt.py").write_text("def json() -> str:\n    return '{}'\n")
+    (tmp_path / "client.py").write_text("def fetch() -> None:\n    return None\n")
+    with GraphStore.open(tmp_path) as store:
+        index_repository(tmp_path, store)
+        with store.transaction():
+            store.add_edges(
+                [
+                    Edge(
+                        src="client.fetch",
+                        dst="route:GET /api/v1/users.json",
+                        kind="http_calls",
+                        path="client.py",
+                        line=1,
+                        resolved=False,
+                    )
+                ]
+            )
+            link(store)
+        [edge] = store.all_edges(kinds=["http_calls"])
+    assert edge.dst == "route:GET /api/v1/users.json"
+    assert not edge.resolved

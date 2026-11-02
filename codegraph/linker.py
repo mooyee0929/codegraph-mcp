@@ -14,8 +14,16 @@ from __future__ import annotations
 import re
 from collections import defaultdict
 
-from codegraph.models import Edge
+from codegraph.models import Edge, EdgeKind
 from codegraph.store import GraphStore
+
+LINKABLE_KINDS: frozenset[EdgeKind] = frozenset({"calls", "inherits"})
+"""Edge kinds whose unresolved targets are bare code names worth looking up.
+
+Passes deliberately leave other kinds unresolved with non-code targets, such as
+``route:GET /users.json`` for an HTTP call no route matched or a Kubernetes selector;
+name lookup on those would link them to whatever function shares the last segment.
+"""
 
 _TEST_PATH = re.compile(
     r"(^|/)(tests?|__tests__|spec)(/|$)"
@@ -211,6 +219,8 @@ def link(store: GraphStore) -> int:
 
     upgraded = 0
     for edge_id, edge in store.edge_ids_unresolved():
+        if edge.kind not in LINKABLE_KINDS:
+            continue
         is_method_call = edge.dst.startswith("*.")
         name = edge.dst.rsplit(".", 1)[-1]
         if is_method_call and name in COMMON_METHOD_NAMES:
