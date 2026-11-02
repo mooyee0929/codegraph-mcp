@@ -7,12 +7,15 @@ import threading
 import urllib.error
 import urllib.request
 import xml.etree.ElementTree as ET
+from collections.abc import Iterator
 from datetime import date
 from pathlib import Path
 
 import pytest
 
 from codegraph import adr, notes
+from codegraph.analysis.common import ensure_tables
+from codegraph.analysis.communities import DDL as COMMUNITY_DDL
 from codegraph.exports import (
     ExportError,
     community_membership,
@@ -20,6 +23,7 @@ from codegraph.exports import (
     normalise_format,
     render,
 )
+from codegraph.indexer import index_repository
 from codegraph.models import Node
 from codegraph.store import GraphStore
 from codegraph.visualize import (
@@ -34,24 +38,37 @@ from codegraph.visualize import (
 from codegraph.wiki import generate_wiki, list_wiki_pages, read_wiki_page
 
 TODAY = date(2026, 11, 2)
+ANALYSIS_PASSES = frozenset({"communities", "flows"})
+
+
+@pytest.fixture
+def bare_store(repo: Path) -> Iterator[GraphStore]:
+    """The sample repo indexed without the analysis passes, so no community tables."""
+    with GraphStore.open(repo) as graph_store:
+        index_repository(repo, graph_store, skip_passes=ANALYSIS_PASSES)
+        yield graph_store
 
 
 def _add_communities(store: GraphStore) -> None:
-    store.ensure_schema(
-        "CREATE TABLE IF NOT EXISTS analysis_communities (id INTEGER PRIMARY KEY, name TEXT);"
-        "CREATE TABLE IF NOT EXISTS analysis_community_members "
-        "(community_id INTEGER, qname TEXT);"
-    )
+    """Replace whatever the communities pass stored with two known communities."""
     with store.transaction() as conn:
-        conn.execute("INSERT INTO analysis_communities VALUES (1, 'billing'), (2, 'web')")
+        ensure_tables(store, COMMUNITY_DDL)
+        conn.execute("DELETE FROM analysis_community_members")
+        conn.execute("DELETE FROM analysis_communities")
         conn.executemany(
-            "INSERT INTO analysis_community_members VALUES (?, ?)",
+            "INSERT INTO analysis_communities "
+            "(id, name, size, cohesion, internal_weight, external_weight, files, prefix) "
+            "VALUES (?, ?, ?, 0.5, 1.0, 1.0, 1, ?)",
+            [(1, "billing", 3, "pkg"), (2, "web", 2, "web")],
+        )
+        conn.executemany(
+            "INSERT INTO analysis_community_members (qname, community_id, rank) VALUES (?, ?, ?)",
             [
-                (1, "pkg.billing"),
-                (1, "pkg.billing.charge"),
-                (1, "pkg.util.fmt"),
-                (2, "web.app"),
-                (2, "web.app.Handler"),
+                ("pkg.billing", 1, 0),
+                ("pkg.billing.charge", 1, 1),
+                ("pkg.util.fmt", 1, 2),
+                ("web.app", 2, 0),
+                ("web.app.Handler", 2, 1),
             ],
         )
 
@@ -156,7 +173,8 @@ def test_notes_save_search_and_parse(tmp_path: Path) -> None:
 # -- wiki -------------------------------------------------------------------------------
 
 
-def test_wiki_pages_without_communities(repo: Path, store: GraphStore) -> None:
+def test_wiki_pages_without_communities(repo: Path, bare_store: GraphStore) -> None:
+    store = bare_store
     result = generate_wiki(repo, store)
     assert "index.md" in result.pages and "modules/pkg.billing.md" in result.pages
     index = read_wiki_page(repo, "index")
@@ -194,21 +212,18 @@ def test_wiki_communities_and_stale_pages(repo: Path, store: GraphStore) -> None
 # -- exports ----------------------------------------------------------------------------
 
 
-def test_community_membership_shapes(store: GraphStore) -> None:
-    assert community_membership(store) == {}
-    _add_communities(store)
-    membership = community_membership(store)
+def test_community_membership(bare_store: GraphStore) -> None:
+    assert community_membership(bare_store) == {}
+    _add_communities(bare_store)
+    membership = community_membership(bare_store)
     assert membership["pkg.billing.charge"] == "billing"
     assert membership["web.app"] == "web"
 
 
-def test_community_membership_single_table(store: GraphStore) -> None:
-    store.ensure_schema(
-        "CREATE TABLE analysis_communities (qname TEXT, community_id INTEGER, label TEXT);"
-    )
-    with store.transaction() as conn:
-        conn.execute("INSERT INTO analysis_communities VALUES ('web.app', 3, 'frontend')")
-    assert community_membership(store) == {"web.app": "frontend"}
+def test_community_membership_from_the_pass(store: GraphStore) -> None:
+    membership = community_membership(store)
+    assert membership
+    assert set(membership) <= {n.qname for n in store.all_nodes()}
 
 
 def test_load_graph_caps_by_degree(store: GraphStore) -> None:
@@ -277,8 +292,8 @@ def test_exports_escape_hostile_text(store: GraphStore) -> None:
 # -- visualisation and UI ------------------------------------------------------------------
 
 
-def test_visualization_is_self_contained(repo: Path, store: GraphStore) -> None:
-    path, data = write_visualization(repo, store, max_nodes=5)
+def test_visualization_is_self_contained(repo: Path, bare_store: GraphStore) -> None:
+    path, data = write_visualization(repo, bare_store, max_nodes=5)
     assert path == repo / ".codegraph" / "graph.html"
     page = path.read_text()
     assert "<canvas" in page and "src=" not in page and "https://" not in page
