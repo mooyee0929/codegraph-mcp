@@ -142,3 +142,16 @@ async def test_tool_filter_restricts_server(repo: Path) -> None:
     assert {t.name for t in await server.list_tools()} == {"graph_status", "get_node"}
     with pytest.raises(ValueError, match="nope"):
         build_server(repo, tools=frozenset({"nope"}))
+
+
+def test_db_api_method_calls_are_not_linked_to_a_unique_definition(tmp_path: Path) -> None:
+    (tmp_path / "query.py").write_text("def execute(text: str) -> str:\n    return text\n")
+    (tmp_path / "db.py").write_text(
+        "import sqlite3\n\n\ndef count(conn: sqlite3.Connection) -> int:\n"
+        "    return conn.execute('SELECT 1').fetchone()[0]\n"
+    )
+    with GraphStore.open(tmp_path) as store:
+        index_repository(tmp_path, store)
+        callees = {e.dst for e in store.edges_from("db.count", "calls")}
+    assert "query.execute" not in callees
+    assert "*.execute" in callees
