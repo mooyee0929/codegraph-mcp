@@ -6,7 +6,7 @@ lists of qnames — nothing that requires a live connection to render.
 
 from __future__ import annotations
 
-from collections import Counter, defaultdict, deque
+from collections import Counter, deque
 from dataclasses import dataclass
 
 from codegraph.models import Edge, EdgeKind, ImpactReport, Node
@@ -197,20 +197,11 @@ def architecture_overview(store: GraphStore, top: int = 10) -> ArchitectureOverv
 
 
 def dead_code(store: GraphStore) -> list[Node]:
-    """Callables nothing calls, tests, or subclasses. Public entry points show up too —
-    treat this as a candidate list, not a verdict."""
-    incoming: defaultdict[str, int] = defaultdict(int)
-    for node in store.all_nodes():
-        for edge in store.edges_from(node.qname):
-            if edge.kind in {"calls", "tests", "inherits"}:
-                incoming[edge.dst] += 1
-    return sorted(
-        (
-            n
-            for n in store.all_nodes(kinds=("function", "method", "class"))
-            if incoming[n.qname] == 0
-            and not n.name.startswith("_")
-            and not n.name.startswith("test")
-        ),
-        key=lambda n: (n.path, n.line_start),
-    )
+    """Functions, methods and classes nothing references, minus entry points, route
+    handlers, framework-registered or exported callables, dunders, overrides and classes
+    used in type annotations. Still a candidate list, not a verdict; the heuristics are
+    documented in :mod:`codegraph.analysis.deadcode`."""
+    # Lazy: the core query module should not load the analysis package at import time.
+    from codegraph.analysis.deadcode import dead_code_candidates
+
+    return dead_code_candidates(store)

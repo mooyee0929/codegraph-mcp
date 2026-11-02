@@ -14,11 +14,28 @@ from __future__ import annotations
 import re
 from collections import defaultdict
 
-from codegraph.models import Edge
+from codegraph.models import Edge, EdgeKind
 from codegraph.store import GraphStore
 
+LINKABLE_KINDS: frozenset[EdgeKind] = frozenset({"calls", "inherits"})
+"""Edge kinds whose unresolved targets are bare code names worth looking up.
+
+Passes deliberately leave other kinds unresolved with non-code targets, such as
+``route:GET /users.json`` for an HTTP call no route matched or a Kubernetes selector;
+name lookup on those would link them to whatever function shares the last segment.
+"""
+
 _TEST_PATH = re.compile(
-    r"(^|/)(tests?|__tests__|spec)(/|$)|(^|/)test_[^/]*\.py$|[._-](test|spec)\.[cm]?[jt]sx?$"
+    r"(^|/)(tests?|__tests__|spec)(/|$)"
+    r"|(^|/)test_[^/]*\.py$"
+    r"|[._-](test|spec)\.[cm]?[jt]sx?$"
+    r"|_test\.(go|rs|dart|exs|rb|lua|c|cc|cpp|cxx)$"
+    r"|_(spec|unittest)\.(rb|lua|cc|cpp)$"
+    r"|(Test|Tests|IT|Spec|Suite)\.(java|kt|kts|groovy|scala|cs|php|swift|m)$"
+    r"|Spec\.hs$"
+    r"|(^|/)test_[^/]*\.(c|cc|cpp|cxx|rb|sh|lua)$"
+    r"|_(SUITE|tests)\.erl$"
+    r"|\.t\.sol$"
 )
 
 
@@ -30,81 +47,157 @@ def is_test_path(rel_path: str) -> bool:
 # definition with the same name is almost certainly not the callee.
 COMMON_METHOD_NAMES: frozenset[str] = frozenset(
     {
+        "Add",
         "add",
+        "alloc",
+        "Any",
         "append",
         "apply",
+        "as_ref",
+        "as_str",
         "bind",
+        "borrow",
+        "borrow_mut",
         "call",
         "catch",
         "clear",
+        "clone",
+        "Close",
         "close",
+        "collect",
+        "commit",
+        "cursor",
+        "execute",
+        "executemany",
+        "executescript",
+        "fetchall",
+        "fetchmany",
+        "fetchone",
+        "rollback",
+        "Contains",
+        "contains",
+        "containsKey",
         "copy",
+        "Count",
         "count",
+        "dealloc",
         "debug",
         "decode",
         "delete",
         "describe",
+        "Do",
         "done",
+        "each",
         "emit",
         "encode",
         "endswith",
+        "Equals",
+        "equals",
+        "Error",
         "error",
+        "Errorf",
         "exists",
         "expect",
         "extend",
+        "Fatal",
+        "Fatalf",
         "filter",
         "find",
+        "First",
         "forEach",
         "format",
         "get",
+        "GetHashCode",
+        "getOrDefault",
         "group",
         "has",
+        "hashCode",
         "includes",
         "index",
         "info",
+        "init",
         "insert",
+        "into",
+        "is_empty",
+        "isEmpty",
         "it",
         "items",
+        "iter",
         "join",
         "json",
         "keys",
+        "Len",
+        "len",
+        "length",
+        "Lock",
+        "lock",
         "log",
         "lower",
         "map",
+        "map_err",
         "match",
+        "new",
         "next",
         "off",
+        "ok_or",
         "on",
         "once",
         "open",
         "pop",
+        "Print",
+        "print",
+        "Printf",
+        "printf",
+        "Println",
+        "println",
         "push",
+        "put",
+        "puts",
+        "Read",
         "read",
         "reduce",
         "reject",
+        "release",
+        "Remove",
         "remove",
         "replace",
+        "require",
         "resolve",
+        "retain",
         "run",
         "search",
+        "Select",
         "send",
         "set",
+        "size",
         "slice",
         "sort",
         "splice",
         "split",
+        "Sprintf",
         "startswith",
         "status",
+        "stream",
+        "String",
         "strip",
         "sub",
         "test",
         "text",
         "then",
+        "to_string",
+        "ToList",
+        "ToString",
         "toString",
+        "Unlock",
+        "unwrap",
+        "unwrap_or",
         "update",
         "upper",
         "values",
+        "Wait",
         "warn",
+        "Where",
+        "Write",
         "write",
     }
 )
@@ -126,6 +219,8 @@ def link(store: GraphStore) -> int:
 
     upgraded = 0
     for edge_id, edge in store.edge_ids_unresolved():
+        if edge.kind not in LINKABLE_KINDS:
+            continue
         is_method_call = edge.dst.startswith("*.")
         name = edge.dst.rsplit(".", 1)[-1]
         if is_method_call and name in COMMON_METHOD_NAMES:

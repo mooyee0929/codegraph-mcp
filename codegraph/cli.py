@@ -1,4 +1,7 @@
-"""Command-line front end. Same operations as the MCP server, human-readable output."""
+"""Command-line front end. Same operations as the MCP server, human-readable output.
+
+Core commands live here; feature commands are contributed by :mod:`codegraph.commands`.
+"""
 
 from __future__ import annotations
 
@@ -10,6 +13,7 @@ from dataclasses import asdict
 from pathlib import Path
 
 from codegraph import __version__
+from codegraph.commands import register_all as register_feature_commands
 from codegraph.indexer import index_repository
 from codegraph.queries import (
     PATTERNS,
@@ -30,7 +34,9 @@ def _open(root: Path) -> GraphStore:
 
 def cmd_index(args: argparse.Namespace) -> int:
     with _open(args.root) as store:
-        stats = index_repository(args.root, store, force=args.force)
+        stats = index_repository(
+            args.root, store, force=args.force, skip_passes=frozenset(args.skip_pass)
+        )
     print(stats.summary())
     return 0
 
@@ -188,7 +194,28 @@ def cmd_show(args: argparse.Namespace) -> int:
 def cmd_serve(args: argparse.Namespace) -> int:
     from codegraph.server import main as serve_main
 
-    return serve_main(["--root", str(args.root), "--transport", args.transport])
+    argv = ["--root", str(args.root), "--transport", args.transport]
+    if args.tools:
+        argv += ["--tools", args.tools]
+    if args.watch:
+        argv.append("--watch")
+    if args.auto_index:
+        argv.append("--auto-index")
+    return serve_main(argv)
+
+
+def cmd_passes(args: argparse.Namespace) -> int:
+    from codegraph.passes import discover_passes
+
+    found = discover_passes()
+    if args.json:
+        print(json.dumps([{"name": p.name, "order": p.order} for p in found], indent=2))
+        return 0
+    for graph_pass in found:
+        print(f"{graph_pass.order:>3}  {graph_pass.name}")
+    if not found:
+        print("no passes installed", file=sys.stderr)
+    return 0
 
 
 def _print_list(label: str, items: tuple[str, ...]) -> None:
@@ -215,6 +242,13 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = add("index", cmd_index, "build or refresh the graph")
     p.add_argument("--force", action="store_true", help="re-parse unchanged files too")
+    p.add_argument(
+        "--skip-pass",
+        action="append",
+        default=[],
+        metavar="NAME",
+        help="skip a post-index pass (repeatable); see `codegraph passes`",
+    )
 
     add("status", cmd_status, "row counts and db location")
 
@@ -246,6 +280,15 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = add("serve", cmd_serve, "run the MCP server")
     p.add_argument("--transport", choices=("stdio", "sse", "streamable-http"), default="stdio")
+    p.add_argument("--tools", help="comma-separated tool names to expose (default: all)")
+    p.add_argument("--watch", action="store_true", help="re-index in the background on change")
+    p.add_argument(
+        "--auto-index", action="store_true", help="index on startup when the graph is stale"
+    )
+
+    add("passes", cmd_passes, "list the post-index passes in run order")
+
+    register_feature_commands(add)
     return parser
 
 

@@ -2,21 +2,24 @@
 
 Run with ``codegraph-mcp --root /path/to/repo`` (or let it default to the current
 directory). Every tool takes and returns plain JSON so any MCP client can use it.
+
+The core tools live here; feature tools are contributed by the modules in
+:mod:`codegraph.tools`. ``--tools a,b,c`` (or ``CODEGRAPH_TOOLS``) exposes only the
+named tools, which keeps the tool list short for clients that pay per tool schema.
 """
 
 from __future__ import annotations
 
 import argparse
-import json
+import os
 import sys
-from dataclasses import asdict, is_dataclass
+from dataclasses import asdict
 from pathlib import Path
 from typing import Literal, cast
 
 from mcp.server.mcpserver import MCPServer
 
 from codegraph.indexer import index_repository
-from codegraph.models import Node
 from codegraph.queries import (
     PATTERNS,
     answer_side,
@@ -27,7 +30,11 @@ from codegraph.queries import (
     resolve_target,
 )
 from codegraph.review import GitError, detect_changes, review_context
-from codegraph.store import GraphStore, StoreError, default_db_path
+from codegraph.store import GraphStore, StoreError
+from codegraph.tools import ToolContext, register_all
+from codegraph.tools import dump as _dump
+from codegraph.tools import node_summary as _node_summary
+from codegraph.watch import AUTO_INDEX_ENV, WATCH_ENV, env_flag, start_background_sync
 
 QueryPattern = Literal[
     "callers_of",
@@ -41,30 +48,10 @@ QueryPattern = Literal[
 ]
 
 
-def _dump(value: object) -> str:
-    def default(obj: object) -> object:
-        if is_dataclass(obj) and not isinstance(obj, type):
-            return asdict(obj)
-        if isinstance(obj, tuple | set | frozenset):
-            return list(obj)
-        raise TypeError(f"cannot serialise {type(obj).__name__}")
-
-    return json.dumps(value, default=default, indent=2)
-
-
-def _node_summary(node: Node) -> dict[str, object]:
-    return {
-        "qname": node.qname,
-        "kind": node.kind,
-        "path": node.path,
-        "lines": [node.line_start, node.line_end],
-        "signature": node.signature,
-        "docstring": node.docstring,
-    }
-
-
-def build_server(root: Path) -> MCPServer[None]:
+def build_server(root: Path, tools: frozenset[str] | None = None) -> MCPServer[None]:
+    """Build the server for ``root``. ``tools`` limits the exposed tools to those names."""
     root = root.resolve()
+    ctx = ToolContext(root=root)
     server: MCPServer[None] = MCPServer(
         "codegraph",
         instructions=(
@@ -76,7 +63,7 @@ def build_server(root: Path) -> MCPServer[None]:
     )
 
     def _store() -> GraphStore:
-        return GraphStore(default_db_path(root))
+        return ctx.open_store()
 
     @server.tool()
     def index_repository_tool(force: bool = False) -> str:
@@ -175,7 +162,38 @@ def build_server(root: Path) -> MCPServer[None]:
         with _store() as store:
             return _dump([_node_summary(n) for n in dead_code(store)[:limit]])
 
+    register_all(server, ctx)
+    if tools is not None:
+        _restrict_tools(server, tools)
     return server
+
+
+def _registered_tool_names(server: MCPServer[None]) -> set[str]:
+    # MCPServer.list_tools is async; build_server may run inside an event loop, so
+    # read the synchronous tool manager instead.
+    manager = getattr(server, "_tool_manager", None)
+    list_tools = getattr(manager, "list_tools", None)
+    if not callable(list_tools):
+        raise RuntimeError("cannot enumerate tools on this mcp version; drop --tools")
+    listed: list[object] = list_tools()
+    return {str(getattr(tool, "name", "")) for tool in listed}
+
+
+def _restrict_tools(server: MCPServer[None], allowed: frozenset[str]) -> None:
+    registered = _registered_tool_names(server)
+    unknown = allowed - registered
+    if unknown:
+        raise ValueError(f"unknown tool(s) in --tools: {', '.join(sorted(unknown))}")
+    for name in registered - allowed:
+        server.remove_tool(name)
+
+
+def parse_tool_filter(raw: str | None) -> frozenset[str] | None:
+    """``"a, b"`` -> ``{"a", "b"}``; empty or missing -> None (expose everything)."""
+    if not raw:
+        return None
+    names = frozenset(part.strip() for part in raw.split(",") if part.strip())
+    return names or None
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -186,16 +204,43 @@ def main(argv: list[str] | None = None) -> int:
         choices=("stdio", "sse", "streamable-http"),
         default="stdio",
     )
+    parser.add_argument(
+        "--tools",
+        default=os.environ.get("CODEGRAPH_TOOLS"),
+        help="comma-separated tool names to expose (default: all; env CODEGRAPH_TOOLS)",
+    )
+    parser.add_argument(
+        "--watch",
+        action="store_true",
+        default=env_flag(WATCH_ENV),
+        help=f"re-index in the background when files change (env {WATCH_ENV}=1)",
+    )
+    parser.add_argument(
+        "--auto-index",
+        action="store_true",
+        default=env_flag(AUTO_INDEX_ENV),
+        help="index on startup when the graph is missing, empty or stale, restoring "
+        f".codegraph/graph.db.gz first when there is no database (env {AUTO_INDEX_ENV}=1)",
+    )
     args = parser.parse_args(argv)
     if not args.root.is_dir():
         print(f"not a directory: {args.root}", file=sys.stderr)
         return 2
-    server = build_server(args.root)
-    server.run(transport=cast(Literal["stdio", "sse", "streamable-http"], args.transport))
+    try:
+        server = build_server(args.root, tools=parse_tool_filter(args.tools))
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+    sync = start_background_sync(args.root.resolve(), auto=args.auto_index, watch=args.watch)
+    try:
+        server.run(transport=cast(Literal["stdio", "sse", "streamable-http"], args.transport))
+    finally:
+        if sync is not None:
+            sync.stop()
     return 0
 
 
-__all__ = ["PATTERNS", "build_server", "main"]
+__all__ = ["PATTERNS", "build_server", "main", "parse_tool_filter"]
 
 
 if __name__ == "__main__":
