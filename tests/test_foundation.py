@@ -68,6 +68,19 @@ def test_edge_confidence_round_trips(store: GraphStore) -> None:
     assert store.all_edges(kinds=["similar_to"]) == []
 
 
+def test_ensure_schema_keeps_the_open_transaction(store: GraphStore) -> None:
+    with pytest.raises(RuntimeError, match="abort"), store.transaction():
+        store.set_meta("probe", "written")
+        store.ensure_schema(
+            "CREATE TABLE IF NOT EXISTS t_probe (x INTEGER);\n"
+            "CREATE INDEX IF NOT EXISTS idx_t_probe ON t_probe (x);\n"
+        )
+        raise RuntimeError("abort")
+    assert store.get_meta("probe") is None
+    with pytest.raises(StoreError, match="incomplete"):
+        store.ensure_schema("CREATE TABLE IF NOT EXISTS t_broken (x INTEGER")
+
+
 def test_counts_by_kind(store: GraphStore) -> None:
     grouped = store.counts_by_kind()
     assert grouped["languages"] == {"python": 5, "typescript": 3}

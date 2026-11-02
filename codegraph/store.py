@@ -163,8 +163,21 @@ class GraphStore:
         return self._conn
 
     def ensure_schema(self, ddl: str) -> None:
-        """Run idempotent ``CREATE ... IF NOT EXISTS`` statements for an extension table."""
-        self._conn.executescript(ddl)
+        """Run idempotent ``CREATE ... IF NOT EXISTS`` statements for an extension table.
+
+        Statements run one at a time rather than through ``executescript``, which would
+        commit whatever transaction the caller (usually the indexer) has open.
+        """
+        pieces = ddl.split(";")
+        pending = ""
+        for index, piece in enumerate(pieces):
+            pending += piece if index == len(pieces) - 1 else piece + ";"
+            if sqlite3.complete_statement(pending):
+                if pending.strip().strip(";").strip():
+                    self._conn.execute(pending)
+                pending = ""
+        if pending.strip():
+            raise StoreError(f"incomplete DDL statement: {pending.strip()[:80]!r}")
 
     @contextmanager
     def transaction(self) -> Iterator[sqlite3.Connection]:
