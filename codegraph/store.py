@@ -21,7 +21,7 @@ from typing import cast
 
 from codegraph.models import Edge, EdgeKind, Language, Node, NodeKind
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 DB_DIRNAME = ".codegraph"
 DB_FILENAME = "graph.db"
@@ -40,7 +40,8 @@ CREATE TABLE IF NOT EXISTS files (
 );
 
 CREATE TABLE IF NOT EXISTS nodes (
-    qname      TEXT PRIMARY KEY,
+    id         INTEGER PRIMARY KEY,
+    qname      TEXT NOT NULL UNIQUE,
     kind       TEXT NOT NULL,
     path       TEXT NOT NULL,
     line_start INTEGER NOT NULL,
@@ -71,7 +72,9 @@ CREATE INDEX IF NOT EXISTS idx_edges_src  ON edges (src, kind);
 CREATE INDEX IF NOT EXISTS idx_edges_dst  ON edges (dst, kind);
 CREATE INDEX IF NOT EXISTS idx_edges_path ON edges (path);
 CREATE INDEX IF NOT EXISTS idx_edges_kind ON edges (kind);
+CREATE INDEX IF NOT EXISTS idx_edges_site ON edges (src, kind, path, line, resolved);
 
+-- rowid = nodes.id, so rows are found and removed by key instead of by scanning.
 CREATE VIRTUAL TABLE IF NOT EXISTS nodes_fts USING fts5 (
     qname, name, signature, docstring
 );
@@ -205,12 +208,9 @@ class GraphStore:
 
     def forget_file(self, path: str) -> None:
         """Drop a file and everything parsed out of it."""
-        qnames = [
-            r["qname"]
-            for r in self._conn.execute("SELECT qname FROM nodes WHERE path = ?", (path,))
-        ]
-        for qname in qnames:
-            self._conn.execute("DELETE FROM nodes_fts WHERE qname = ?", (qname,))
+        self._conn.execute(
+            "DELETE FROM nodes_fts WHERE rowid IN (SELECT id FROM nodes WHERE path = ?)", (path,)
+        )
         self._conn.execute("DELETE FROM nodes WHERE path = ?", (path,))
         self._conn.execute("DELETE FROM edges WHERE path = ?", (path,))
         self._conn.execute("DELETE FROM files WHERE path = ?", (path,))
@@ -223,13 +223,13 @@ class GraphStore:
     def add_nodes(self, nodes: Iterable[Node]) -> int:
         count = 0
         for node in nodes:
-            self._conn.execute(
+            row = self._conn.execute(
                 "INSERT INTO nodes (qname, kind, path, line_start, line_end, language, name, "
                 "signature, docstring) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) "
                 "ON CONFLICT(qname) DO UPDATE SET kind=excluded.kind, path=excluded.path, "
                 "line_start=excluded.line_start, line_end=excluded.line_end, "
                 "language=excluded.language, name=excluded.name, signature=excluded.signature, "
-                "docstring=excluded.docstring",
+                "docstring=excluded.docstring RETURNING id",
                 (
                     node.qname,
                     node.kind,
@@ -241,11 +241,13 @@ class GraphStore:
                     node.signature,
                     node.docstring,
                 ),
-            )
-            self._conn.execute("DELETE FROM nodes_fts WHERE qname = ?", (node.qname,))
+            ).fetchone()
+            node_id = int(row["id"])
+            self._conn.execute("DELETE FROM nodes_fts WHERE rowid = ?", (node_id,))
             self._conn.execute(
-                "INSERT INTO nodes_fts (qname, name, signature, docstring) VALUES (?, ?, ?, ?)",
-                (node.qname, node.name, node.signature, node.docstring or ""),
+                "INSERT INTO nodes_fts (rowid, qname, name, signature, docstring) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (node_id, node.qname, node.name, node.signature, node.docstring or ""),
             )
             count += 1
         return count
@@ -366,9 +368,12 @@ class GraphStore:
             r["qname"]
             for r in self._conn.execute("SELECT qname FROM nodes WHERE kind = ?", (kind,))
         ]
+        self._conn.execute(
+            "DELETE FROM nodes_fts WHERE rowid IN (SELECT id FROM nodes WHERE kind = ?)", (kind,)
+        )
         for qname in qnames:
-            self._conn.execute("DELETE FROM nodes_fts WHERE qname = ?", (qname,))
-            self._conn.execute("DELETE FROM edges WHERE src = ? OR dst = ?", (qname, qname))
+            self._conn.execute("DELETE FROM edges WHERE src = ?", (qname,))
+            self._conn.execute("DELETE FROM edges WHERE dst = ?", (qname,))
         self._conn.execute("DELETE FROM nodes WHERE kind = ?", (kind,))
         return len(qnames)
 
