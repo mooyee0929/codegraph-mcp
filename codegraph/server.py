@@ -34,6 +34,7 @@ from codegraph.store import GraphStore, StoreError
 from codegraph.tools import ToolContext, register_all
 from codegraph.tools import dump as _dump
 from codegraph.tools import node_summary as _node_summary
+from codegraph.watch import AUTO_INDEX_ENV, WATCH_ENV, env_flag, start_background_sync
 
 QueryPattern = Literal[
     "callers_of",
@@ -208,6 +209,19 @@ def main(argv: list[str] | None = None) -> int:
         default=os.environ.get("CODEGRAPH_TOOLS"),
         help="comma-separated tool names to expose (default: all; env CODEGRAPH_TOOLS)",
     )
+    parser.add_argument(
+        "--watch",
+        action="store_true",
+        default=env_flag(WATCH_ENV),
+        help=f"re-index in the background when files change (env {WATCH_ENV}=1)",
+    )
+    parser.add_argument(
+        "--auto-index",
+        action="store_true",
+        default=env_flag(AUTO_INDEX_ENV),
+        help="index on startup when the graph is missing, empty or stale, restoring "
+        f".codegraph/graph.db.gz first when there is no database (env {AUTO_INDEX_ENV}=1)",
+    )
     args = parser.parse_args(argv)
     if not args.root.is_dir():
         print(f"not a directory: {args.root}", file=sys.stderr)
@@ -217,7 +231,12 @@ def main(argv: list[str] | None = None) -> int:
     except ValueError as exc:
         print(str(exc), file=sys.stderr)
         return 2
-    server.run(transport=cast(Literal["stdio", "sse", "streamable-http"], args.transport))
+    sync = start_background_sync(args.root.resolve(), auto=args.auto_index, watch=args.watch)
+    try:
+        server.run(transport=cast(Literal["stdio", "sse", "streamable-http"], args.transport))
+    finally:
+        if sync is not None:
+            sync.stop()
     return 0
 
 

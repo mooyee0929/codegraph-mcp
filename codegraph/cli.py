@@ -197,6 +197,10 @@ def cmd_serve(args: argparse.Namespace) -> int:
     argv = ["--root", str(args.root), "--transport", args.transport]
     if args.tools:
         argv += ["--tools", args.tools]
+    if args.watch:
+        argv.append("--watch")
+    if args.auto_index:
+        argv.append("--auto-index")
     return serve_main(argv)
 
 
@@ -277,6 +281,10 @@ def build_parser() -> argparse.ArgumentParser:
     p = add("serve", cmd_serve, "run the MCP server")
     p.add_argument("--transport", choices=("stdio", "sse", "streamable-http"), default="stdio")
     p.add_argument("--tools", help="comma-separated tool names to expose (default: all)")
+    p.add_argument("--watch", action="store_true", help="re-index in the background on change")
+    p.add_argument(
+        "--auto-index", action="store_true", help="index on startup when the graph is stale"
+    )
 
     add("passes", cmd_passes, "list the post-index passes in run order")
 
