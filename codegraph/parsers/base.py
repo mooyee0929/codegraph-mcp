@@ -26,6 +26,11 @@ class Parser(Protocol):
 
 _INDEX_STEMS = frozenset({"__init__", "index", "mod"})
 
+# A header and its implementation file share a stem by design (util.h / util.c), so
+# without a marker both would claim the module qname ``util``.
+_HEADER_SUFFIXES = frozenset({".h", ".hh", ".hpp", ".hxx", ".h++"})
+_NAMED_FILES = frozenset({"Dockerfile", "Containerfile"})
+
 
 def module_qname_for(rel_path: str) -> str:
     """Map a repository-relative path to the dotted qname of its module.
@@ -33,9 +38,18 @@ def module_qname_for(rel_path: str) -> str:
     ``pkg/billing.py`` -> ``pkg.billing``; ``pkg/__init__.py`` -> ``pkg``;
     ``web/routes/index.ts`` -> ``web.routes``. Path segments that are not valid
     identifiers (``my-lib``) keep their spelling, so qnames stay reversible.
+
+    C/C++ headers get a ``_h``-style suffix (``src/util.h`` -> ``src.util_h``) so they
+    never collide with the source file of the same name, and ``Dockerfile.prod`` keeps
+    its tag (``Dockerfile_prod``) instead of colliding with the plain ``Dockerfile``.
     """
     parts = PurePosixPath(rel_path)
     stem = parts.stem
+    suffix = parts.suffix.lower()
+    if suffix in _HEADER_SUFFIXES:
+        stem = f"{stem}_{suffix[1:].replace('+', 'p')}"
+    elif stem in _NAMED_FILES and suffix:
+        stem = f"{stem}_{suffix[1:]}"
     if stem.endswith(".d"):  # foo.d.ts
         stem = stem[:-2]
     segments = list(parts.parts[:-1])

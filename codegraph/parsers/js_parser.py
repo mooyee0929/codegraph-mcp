@@ -34,6 +34,9 @@ _FUNCTION_TYPES = frozenset({"function_declaration", "generator_function_declara
 _CONTAINER_TYPES = frozenset(
     {"export_statement", "program", "statement_block", "ambient_declaration"}
 )
+_SOURCE_SUFFIXES = frozenset(
+    {".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx", ".mts", ".cts", ".vue", ".svelte"}
+)
 
 
 def _language_for(language: Language, rel_path: str) -> TSLanguage:
@@ -165,6 +168,11 @@ class _Collector:
                     parts.pop()
                 continue
             parts.append(part)
+        if parts:
+            # "./util.js", "./Child.vue": the file is named with its own suffix.
+            last = PurePosixPath(parts[-1])
+            if last.suffix.lower() in _SOURCE_SUFFIXES:
+                parts[-1] = last.stem
         return module_qname_for("/".join(parts) + ".ts")
 
     # -- traversal --------------------------------------------------------
