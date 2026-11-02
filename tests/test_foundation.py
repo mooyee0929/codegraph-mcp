@@ -82,6 +82,33 @@ def test_ensure_schema_keeps_the_open_transaction(store: GraphStore) -> None:
         store.ensure_schema("CREATE TABLE IF NOT EXISTS t_broken (x INTEGER")
 
 
+def test_fts_rows_follow_nodes_through_reindex_delete_and_vacuum(repo: Path) -> None:
+    def orphans(store: GraphStore) -> int:
+        row = store.connection.execute(
+            "SELECT COUNT(*) FROM nodes_fts WHERE rowid NOT IN (SELECT id FROM nodes)"
+        ).fetchone()
+        return int(row[0])
+
+    def fts_rows(store: GraphStore) -> int:
+        return int(store.connection.execute("SELECT COUNT(*) FROM nodes_fts").fetchone()[0])
+
+    with GraphStore.open(repo) as store:
+        index_repository(repo, store)
+        (repo / "pkg" / "util.py").write_text("def renamed_helper() -> None:\n    return None\n")
+        index_repository(repo, store)
+        assert orphans(store) == 0 and fts_rows(store) == store.counts()["nodes"]
+        hits = [n.qname for n in store.search_nodes("renamed_helper")]
+        assert hits == ["pkg.util.renamed_helper"]
+
+        with store.transaction():
+            store.delete_nodes("class")
+        assert orphans(store) == 0 and fts_rows(store) == store.counts()["nodes"]
+
+        store.connection.execute("VACUUM")
+        assert orphans(store) == 0
+        assert [n.qname for n in store.search_nodes("renamed_helper")] == hits
+
+
 def test_counts_by_kind(store: GraphStore) -> None:
     grouped = store.counts_by_kind()
     assert grouped["languages"] == {"python": 5, "typescript": 3}
