@@ -10,10 +10,10 @@ from pathlib import Path
 import pytest
 
 from codegraph.analysis.architecture import (
+    HISTORY_TABLE,
     architecture,
     change_impact,
     classify_layer,
-    find_history_table,
     package_of,
     risk_level,
     risk_score,
@@ -120,8 +120,8 @@ def test_entry_points_and_flows(shop: Path, shop_store: GraphStore) -> None:
     view = GraphView.load(shop_store)
     entries = {e.qname: e for e in detect_entry_points(view, cli_scripts(shop))}
     assert entries["shop.cli.run_cli"].kind == "cli"
-    assert entries["shop.api.list_orders"].kind == "decorator"
-    assert entries["shop.api.list_orders"].reason == "registered by @*.route"
+    assert entries["shop.api.list_orders"].kind == "route"
+    assert entries["shop.api.list_orders"].reason == "serves GET /orders"
     assert not any(q.startswith("tests.") for q in entries)
 
     flows = load_flows(shop_store)
@@ -184,31 +184,23 @@ def test_architecture_and_history_hotspots(shop: Path, shop_store: GraphStore) -
     assert arch.languages == {"python": 11}
     layers = {p.name: p.layer for p in arch.packages}
     assert layers["shop.util"] == "core"
-    assert [e.qname for e in arch.entry_points][:2] == ["shop.cli.run_cli", "shop.api.list_orders"]
+    assert [e.qname for e in arch.entry_points][:2] == ["shop.api.list_orders", "shop.cli.run_cli"]
     assert arch.hubs and arch.communities and arch.community_boundaries
-    assert arch.hotspots == ()
-    assert find_history_table(shop_store) is None
+    assert arch.hotspots and all(s.table == HISTORY_TABLE for s in arch.hotspots)
+    assert any(s.path in shop_store.indexed_paths() for s in arch.hotspots)
 
-    shop_store.connection.execute("CREATE TABLE analysis_commit_files (sha TEXT, file TEXT)")
+    shop_store.connection.execute(f"DELETE FROM {HISTORY_TABLE}")
     shop_store.connection.executemany(
-        "INSERT INTO analysis_commit_files VALUES (?, ?)",
-        [("a", "shop/cli.py"), ("b", "shop/cli.py"), ("b", "shop/api.py")],
+        f"INSERT INTO {HISTORY_TABLE} (path, commits, authors, first_ts, last_ts, added, removed) "
+        "VALUES (?, ?, 1, 0, 0, 0, 0)",
+        [("shop/orders.py", 7), ("shop/cli.py", 1)],
     )
-    assert find_history_table(shop_store) == ("analysis_commit_files", "file", None)
-    per_commit = architecture(shop_store, shop).hotspots
-    assert [(s.path, s.changes) for s in per_commit] == [("shop/cli.py", 2), ("shop/api.py", 1)]
-
-    shop_store.connection.execute(
-        "CREATE TABLE git_file_history (path TEXT, sha TEXT, commits INTEGER)"
-    )
-    shop_store.connection.executemany(
-        "INSERT INTO git_file_history VALUES (?, ?, ?)",
-        [("shop/orders.py", "a", 5), ("shop/orders.py", "b", 2), ("shop/cli.py", "c", 1)],
-    )
-    assert find_history_table(shop_store) == ("git_file_history", "path", "commits")
     spots = architecture(shop_store, shop).hotspots
     assert [(s.path, s.changes) for s in spots] == [("shop/orders.py", 7), ("shop/cli.py", 1)]
     assert spots[0].symbols >= 5
+
+    shop_store.connection.execute(f"DROP TABLE {HISTORY_TABLE}")
+    assert architecture(shop_store, shop).hotspots == ()
 
 
 def test_architecture_lists_routes(shop: Path, shop_store: GraphStore) -> None:
