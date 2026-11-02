@@ -2,18 +2,16 @@
 
 :func:`architecture` gathers what a newcomer asks first: which languages, which
 packages and in what layer, where execution starts, which routes exist, which nodes
-everything leans on, how the code clusters and where the clusters touch, and (when a
-git-history table exists) which files churn most.
+everything leans on, how the code clusters and where the clusters touch, and (when the
+history pass has run) which files churn most.
 
 Packages are directories. Each gets a layer from its cross-package call traffic,
 following codebase-memory-mcp's heuristic: ``entry`` (has entry points and only calls
 out), ``api`` (serves routes), ``core`` (mostly called), ``leaf`` (only called),
 ``internal`` otherwise.
 
-The history table belongs to another pass and is found, never imported: any table
-whose name mentions history, churn, commits or hotspots and that has a path column. A
-count column (``commits``, ``changes``, ...) is summed when present, otherwise rows
-are counted per path.
+Churn comes from the ``git_file_churn`` table that the history pass writes; when that
+pass was skipped or the repository has no history, hotspots are empty.
 
 :func:`change_impact` extends :func:`codegraph.review.detect_changes` with the flows
 and communities a diff touches, its test gaps, and one overall risk level.
@@ -21,13 +19,12 @@ and communities a diff touches, its test gaps, and one overall risk level.
 
 from __future__ import annotations
 
-import re
 from collections import Counter, defaultdict
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
 from codegraph.analysis.centrality import Hub, hub_nodes
-from codegraph.analysis.common import CALLABLE_KINDS, is_test_node
+from codegraph.analysis.common import CALLABLE_KINDS, is_test_node, table_exists
 from codegraph.analysis.communities import Community, CommunityLink, community_report
 from codegraph.analysis.entrypoints import EntryPoint, cli_scripts, detect_entry_points
 from codegraph.analysis.flows import affected_flows, changed_qnames, flow_report
@@ -36,19 +33,7 @@ from codegraph.linker import is_test_path
 from codegraph.review import detect_changes
 from codegraph.store import GraphStore
 
-_HISTORY_TABLE = re.compile(r"history|churn|commit|hotspot", re.IGNORECASE)
-_PATH_COLUMNS = ("path", "file", "file_path", "filename")
-_COUNT_COLUMNS = (
-    "commits",
-    "commit_count",
-    "n_commits",
-    "changes",
-    "change_count",
-    "churn",
-    "touches",
-    "revisions",
-    "count",
-)
+HISTORY_TABLE = "git_file_churn"
 ROOT_PACKAGE = "(root)"
 
 
@@ -253,43 +238,12 @@ def _packages(
     return infos, boundaries
 
 
-def find_history_table(store: GraphStore) -> tuple[str, str, str | None] | None:
-    """``(table, path_column, count_column)`` of a git-history table, if one exists.
-
-    Tables with a per-path count column win over per-commit row tables; ties go to
-    the alphabetically first name, so the choice is stable.
-    """
-    rows = store.connection.execute(
-        "SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name"
-    ).fetchall()
-    per_row: tuple[str, str, str | None] | None = None
-    for row in rows:
-        name = str(row["name"])
-        if name.startswith("sqlite_") or not _HISTORY_TABLE.search(name):
-            continue
-        info = store.connection.execute(f'PRAGMA table_info("{name}")')
-        columns = [str(c["name"]) for c in info]
-        path_column = next((c for c in _PATH_COLUMNS if c in columns), None)
-        if path_column is None:
-            continue
-        count_column = next((c for c in _COUNT_COLUMNS if c in columns), None)
-        if count_column is not None:
-            return name, path_column, count_column
-        if per_row is None:
-            per_row = (name, path_column, None)
-    return per_row
-
-
 def history_hotspots(store: GraphStore, view: GraphView, *, top: int = 10) -> list[Hotspot]:
-    """Most-changed files according to the history table; empty when there is none."""
-    found = find_history_table(store)
-    if found is None:
+    """Files with the most commits according to the history pass; empty without it."""
+    if not table_exists(store, HISTORY_TABLE):
         return []
-    table, path_column, count_column = found
-    measure = f'SUM("{count_column}")' if count_column else "COUNT(*)"
     rows = store.connection.execute(
-        f'SELECT "{path_column}" AS path, {measure} AS changes FROM "{table}" '
-        f'GROUP BY "{path_column}" ORDER BY changes DESC, path LIMIT ?',
+        f"SELECT path, commits FROM {HISTORY_TABLE} ORDER BY commits DESC, path LIMIT ?",
         (top,),
     ).fetchall()
     per_file: Counter[str] = Counter(
@@ -298,9 +252,9 @@ def history_hotspots(store: GraphStore, view: GraphView, *, top: int = 10) -> li
     return [
         Hotspot(
             path=str(r["path"]),
-            changes=int(r["changes"] or 0),
+            changes=int(r["commits"]),
             symbols=per_file[str(r["path"])],
-            table=table,
+            table=HISTORY_TABLE,
         )
         for r in rows
     ]
@@ -409,7 +363,7 @@ __all__ = [
     "architecture",
     "change_impact",
     "classify_layer",
-    "find_history_table",
+    "HISTORY_TABLE",
     "history_hotspots",
     "package_of",
     "risk_level",

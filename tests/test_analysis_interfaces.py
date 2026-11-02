@@ -186,8 +186,8 @@ async def test_architecture_tool(shop: Path) -> None:
     assert isinstance(arch, dict)
     assert arch["languages"] == {"python": 11}
     assert len(arch["hubs"]) == 3
-    assert arch["entry_points"][0]["qname"] == "shop.cli.run_cli"
-    assert arch["hotspots"] == []
+    assert arch["entry_points"][0]["qname"] == "shop.api.list_orders"
+    assert arch["hotspots"] and all(h["table"] == "git_file_churn" for h in arch["hotspots"])
 
 
 def test_cli_commands(shop: Path, capsys: pytest.CaptureFixture[str]) -> None:
