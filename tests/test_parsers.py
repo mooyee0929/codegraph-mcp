@@ -15,7 +15,7 @@ def test_language_of() -> None:
     assert language_of("a.py") == "python"
     assert language_of("a.TSX") == "typescript"
     assert language_of("a.mjs") == "javascript"
-    assert language_of("Makefile") is None
+    assert language_of("LICENSE") is None
 
 
 def test_python_parser_nodes_and_edges() -> None:
