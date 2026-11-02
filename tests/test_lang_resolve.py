@@ -32,9 +32,12 @@ def indexed(tmp_path: Path) -> Iterator[tuple[Path, GraphStore]]:
 
 
 def index_and_resolve(root: Path, store: GraphStore) -> int:
-    index_repository(root, store)
+    """Index (which runs the pass) and return what the pass resolved; re-running is a no-op."""
+    stats = index_repository(root, store)
+    written = sum(p.written for p in stats.passes if p.name == PASS.name)
     with store.transaction():
-        return resolve_repository(root, store)
+        assert resolve_repository(root, store) == 0
+    return written
 
 
 def edges_from(store: GraphStore, src: str, kind: str = "calls") -> set[tuple[str, bool]]:
