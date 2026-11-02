@@ -17,3 +17,6 @@ uv.lock
 .vscode/
 .idea/
 .DS_Store
+
+# local clones of the projects credited in THIRD_PARTY.md
+upstream/
