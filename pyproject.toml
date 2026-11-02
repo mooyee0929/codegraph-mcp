@@ -1,6 +1,6 @@
 [project]
 name = "codegraph-mcp"
-version = "0.1.0"
+version = "0.2.0"
 description = "A code knowledge graph and MCP server: index a repo once, then ask structural questions instead of grepping."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -20,9 +20,14 @@ dependencies = [
     "tree-sitter>=0.23.0",
     "tree-sitter-javascript>=0.23.0",
     "tree-sitter-typescript>=0.23.0",
+    "tree-sitter-language-pack>=0.13.0,<1",
 ]
 
 [project.optional-dependencies]
+embeddings = [
+    "sentence-transformers>=3.0.0",
+    "numpy>=1.26",
+]
 dev = [
     "pytest>=8.0",
     "pytest-asyncio>=0.24",

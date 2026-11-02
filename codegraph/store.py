@@ -3,6 +3,11 @@
 One database file per indexed repository, kept at ``<repo>/.codegraph/graph.db``.
 The store owns schema, transactions and the row<->dataclass mapping; it deliberately
 holds no graph algorithms (those live in :mod:`codegraph.queries`).
+
+Feature modules that need their own tables (flows, communities, embeddings, ...) call
+:meth:`GraphStore.ensure_schema` with ``CREATE TABLE IF NOT EXISTS`` DDL. The whole
+database is a derived cache of the source tree: when the core schema version changes
+the file is rebuilt from scratch rather than migrated.
 """
 
 from __future__ import annotations
@@ -16,7 +21,7 @@ from typing import cast
 
 from codegraph.models import Edge, EdgeKind, Language, Node, NodeKind
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 DB_DIRNAME = ".codegraph"
 DB_FILENAME = "graph.db"
@@ -54,6 +59,8 @@ CREATE TABLE IF NOT EXISTS edges (
     path     TEXT NOT NULL,
     line     INTEGER NOT NULL,
     resolved INTEGER NOT NULL DEFAULT 1,
+    confidence REAL NOT NULL DEFAULT 1.0,
+    detail   TEXT NOT NULL DEFAULT '',
     UNIQUE (src, dst, kind, path, line)
 );
 
@@ -63,6 +70,7 @@ CREATE INDEX IF NOT EXISTS idx_nodes_kind ON nodes (kind);
 CREATE INDEX IF NOT EXISTS idx_edges_src  ON edges (src, kind);
 CREATE INDEX IF NOT EXISTS idx_edges_dst  ON edges (dst, kind);
 CREATE INDEX IF NOT EXISTS idx_edges_path ON edges (path);
+CREATE INDEX IF NOT EXISTS idx_edges_kind ON edges (kind);
 
 CREATE VIRTUAL TABLE IF NOT EXISTS nodes_fts USING fts5 (
     qname, name, signature, docstring
@@ -84,11 +92,21 @@ class GraphStore:
     def __init__(self, db_path: Path) -> None:
         self.db_path = db_path
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        self._conn = sqlite3.connect(str(db_path))
-        self._conn.row_factory = sqlite3.Row
-        self._conn.execute("PRAGMA journal_mode=WAL")
-        self._conn.execute("PRAGMA foreign_keys=ON")
+        self._conn = self._connect()
+        self.rebuilt = False
+        """True when this open discarded a database written by another schema version."""
         self._migrate()
+
+    def _connect(self) -> sqlite3.Connection:
+        conn = sqlite3.connect(str(self.db_path))
+        conn.row_factory = sqlite3.Row
+        try:
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("PRAGMA foreign_keys=ON")
+        except sqlite3.DatabaseError as exc:
+            conn.close()
+            raise StoreError(f"{self.db_path} is not a codegraph database: {exc}") from exc
+        return conn
 
     @classmethod
     def open(cls, repo_root: Path) -> GraphStore:
@@ -106,21 +124,47 @@ class GraphStore:
     # -- schema -----------------------------------------------------------
 
     def _migrate(self) -> None:
+        found = self._stored_version()
+        if found is not None and found != SCHEMA_VERSION:
+            self._rebuild()
         self._conn.executescript(_SCHEMA)
-        row = self._conn.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()
-        if row is None:
+        if self._stored_version() is None:
             self._conn.execute(
                 "INSERT INTO meta (key, value) VALUES ('schema_version', ?)",
                 (str(SCHEMA_VERSION),),
             )
             self._conn.commit()
-            return
-        found = int(row["value"])
-        if found != SCHEMA_VERSION:
-            raise StoreError(
-                f"{self.db_path} was written by schema v{found}, this build speaks "
-                f"v{SCHEMA_VERSION}. Delete the .codegraph directory and re-index."
-            )
+
+    def _stored_version(self) -> int | None:
+        try:
+            row = self._conn.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()
+        except sqlite3.OperationalError:
+            return None  # fresh file, no meta table yet
+        except sqlite3.DatabaseError as exc:
+            raise StoreError(f"{self.db_path} is not a codegraph database: {exc}") from exc
+        if row is None:
+            return None
+        try:
+            return int(row["value"])
+        except ValueError as exc:
+            raise StoreError(f"{self.db_path} has a corrupt schema_version") from exc
+
+    def _rebuild(self) -> None:
+        """Throw away a database from another schema version; it is only a cache."""
+        self._conn.close()
+        for suffix in ("", "-wal", "-shm"):
+            Path(f"{self.db_path}{suffix}").unlink(missing_ok=True)
+        self._conn = self._connect()
+        self.rebuilt = True
+
+    @property
+    def connection(self) -> sqlite3.Connection:
+        """The raw connection, for feature modules that own extension tables."""
+        return self._conn
+
+    def ensure_schema(self, ddl: str) -> None:
+        """Run idempotent ``CREATE ... IF NOT EXISTS`` statements for an extension table."""
+        self._conn.executescript(ddl)
 
     @contextmanager
     def transaction(self) -> Iterator[sqlite3.Connection]:
@@ -197,9 +241,19 @@ class GraphStore:
         count = 0
         for edge in edges:
             self._conn.execute(
-                "INSERT OR IGNORE INTO edges (src, dst, kind, path, line, resolved) "
-                "VALUES (?, ?, ?, ?, ?, ?)",
-                (edge.src, edge.dst, edge.kind, edge.path, edge.line, int(edge.resolved)),
+                "INSERT OR IGNORE INTO edges "
+                "(src, dst, kind, path, line, resolved, confidence, detail) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    edge.src,
+                    edge.dst,
+                    edge.kind,
+                    edge.path,
+                    edge.line,
+                    int(edge.resolved),
+                    edge.confidence,
+                    edge.detail,
+                ),
             )
             count += 1
         return count
@@ -278,6 +332,37 @@ class GraphStore:
             ).fetchall()
         return [_row_to_edge(r) for r in rows]
 
+    def all_edges(self, kinds: Iterable[EdgeKind] | None = None) -> list[Edge]:
+        if kinds is None:
+            rows = self._conn.execute("SELECT * FROM edges").fetchall()
+        else:
+            wanted = list(kinds)
+            placeholders = ",".join("?" * len(wanted))
+            rows = self._conn.execute(
+                f"SELECT * FROM edges WHERE kind IN ({placeholders})", wanted
+            ).fetchall()
+        return [_row_to_edge(r) for r in rows]
+
+    def delete_edges(self, kind: EdgeKind) -> int:
+        """Drop every edge of one kind — passes call this before recomputing theirs."""
+        return self._conn.execute("DELETE FROM edges WHERE kind = ?", (kind,)).rowcount
+
+    def delete_nodes(self, kind: NodeKind) -> int:
+        """Drop every node of one kind plus the edges that touch them."""
+        qnames = [
+            r["qname"]
+            for r in self._conn.execute("SELECT qname FROM nodes WHERE kind = ?", (kind,))
+        ]
+        for qname in qnames:
+            self._conn.execute("DELETE FROM nodes_fts WHERE qname = ?", (qname,))
+            self._conn.execute("DELETE FROM edges WHERE src = ? OR dst = ?", (qname, qname))
+        self._conn.execute("DELETE FROM nodes WHERE kind = ?", (kind,))
+        return len(qnames)
+
+    def file_languages(self) -> dict[str, str]:
+        rows = self._conn.execute("SELECT path, language FROM files").fetchall()
+        return {r["path"]: r["language"] for r in rows}
+
     def unresolved_edges(self) -> list[Edge]:
         rows = self._conn.execute("SELECT * FROM edges WHERE resolved = 0").fetchall()
         return [_row_to_edge(r) for r in rows]
@@ -310,6 +395,20 @@ class GraphStore:
             "nodes": scalar("SELECT COUNT(*) FROM nodes"),
             "edges": scalar("SELECT COUNT(*) FROM edges"),
             "unresolved_edges": scalar("SELECT COUNT(*) FROM edges WHERE resolved = 0"),
+        }
+
+    def counts_by_kind(self) -> dict[str, dict[str, int]]:
+        """``{"nodes": {kind: n}, "edges": {kind: n}, "languages": {lang: files}}``."""
+
+        def grouped(sql: str) -> dict[str, int]:
+            return {str(r[0]): int(r[1]) for r in self._conn.execute(sql).fetchall()}
+
+        return {
+            "nodes": grouped("SELECT kind, COUNT(*) FROM nodes GROUP BY kind ORDER BY kind"),
+            "edges": grouped("SELECT kind, COUNT(*) FROM edges GROUP BY kind ORDER BY kind"),
+            "languages": grouped(
+                "SELECT language, COUNT(*) FROM files GROUP BY language ORDER BY language"
+            ),
         }
 
     def set_meta(self, key: str, value: str) -> None:
@@ -354,4 +453,6 @@ def _row_to_edge(row: sqlite3.Row) -> Edge:
         path=row["path"],
         line=int(row["line"]),
         resolved=bool(row["resolved"]),
+        confidence=float(row["confidence"]),
+        detail=row["detail"],
     )

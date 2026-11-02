@@ -10,31 +10,88 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Literal
 
-Language = Literal["python", "javascript", "typescript"]
+Language = str
+"""Language identifier such as ``python``, ``go`` or ``dockerfile``.
 
-NodeKind = Literal["module", "class", "function", "method"]
-"""What a node is. ``method`` is a function whose parent is a class."""
+The set is open: :mod:`codegraph.parsers.languages` maps file names to identifiers
+and decides which parser handles each one.
+"""
 
-EdgeKind = Literal["calls", "imports", "defines", "inherits", "tests"]
+NodeKind = Literal["module", "class", "function", "method", "route", "channel", "resource"]
+"""What a node is.
+
+- ``module``: one source file.
+- ``class``: any named type — class, struct, interface, trait, enum, protocol.
+- ``function`` / ``method``: a callable; ``method`` has a class as its parent.
+- ``route``: an HTTP (or RPC) endpoint, e.g. ``GET /users/{id}``.
+- ``channel``: a named event/message channel that code emits to or listens on.
+- ``resource``: an infrastructure object — Dockerfile stage, Kubernetes object,
+  compose service, Terraform resource.
+"""
+
+NODE_KINDS: tuple[NodeKind, ...] = (
+    "module",
+    "class",
+    "function",
+    "method",
+    "route",
+    "channel",
+    "resource",
+)
+
+CALLABLE_KINDS: tuple[NodeKind, ...] = ("function", "method")
+
+EdgeKind = Literal[
+    "calls",
+    "imports",
+    "defines",
+    "inherits",
+    "tests",
+    "handles",
+    "http_calls",
+    "emits",
+    "listens_on",
+    "similar_to",
+    "semantically_related",
+    "co_changes",
+    "depends_on",
+]
 """How two nodes relate.
+
+Structural, produced by parsers and the linker:
 
 - ``calls``: src invokes dst.
 - ``imports``: src (a module) pulls dst into scope.
 - ``defines``: src lexically contains dst (module -> class -> method).
-- ``inherits``: src is a subclass of dst.
+- ``inherits``: src is a subclass or implementation of dst.
 - ``tests``: src is a test that exercises dst (inferred, see :mod:`codegraph.linker`).
+
+Derived, produced by post-index passes (:mod:`codegraph.passes`):
+
+- ``handles``: src (a route) is served by dst (a function).
+- ``http_calls``: src (a function) sends a request that dst (a route) serves.
+- ``emits`` / ``listens_on``: src (a function) publishes to / subscribes to dst (a channel).
+- ``similar_to``: src and dst are near-clones; ``confidence`` is the similarity.
+- ``semantically_related``: src and dst share vocabulary but not structure.
+- ``co_changes``: src and dst (modules) are often changed in the same commit.
+- ``depends_on``: src (a resource or module) needs dst — image, volume, manifest entry.
 """
 
-LANGUAGE_BY_SUFFIX: dict[str, Language] = {
-    ".py": "python",
-    ".pyi": "python",
-    ".js": "javascript",
-    ".jsx": "javascript",
-    ".mjs": "javascript",
-    ".cjs": "javascript",
-    ".ts": "typescript",
-    ".tsx": "typescript",
-}
+EDGE_KINDS: tuple[EdgeKind, ...] = (
+    "calls",
+    "imports",
+    "defines",
+    "inherits",
+    "tests",
+    "handles",
+    "http_calls",
+    "emits",
+    "listens_on",
+    "similar_to",
+    "semantically_related",
+    "co_changes",
+    "depends_on",
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -69,6 +126,10 @@ class Edge:
     import to attribute it to emits ``dst="helper"`` and sets ``resolved=False``; a
     method call on an object of unknown type (``inv.total()``) emits ``dst="*.total"``.
     The linker pass upgrades those to full qnames where the target is unambiguous.
+
+    ``confidence`` (0..1) is 1.0 for edges read straight from syntax and lower for
+    heuristic ones (HTTP call-site matching, clone similarity). ``detail`` is a short
+    free-form note such as ``"GET"`` or ``"jaccard=0.83"``.
     """
 
     src: str
@@ -77,6 +138,8 @@ class Edge:
     path: str
     line: int
     resolved: bool = True
+    confidence: float = 1.0
+    detail: str = ""
 
 
 @dataclass(frozen=True, slots=True)
