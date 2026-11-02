@@ -2,10 +2,9 @@
 
 :func:`load_graph` is also the shared loader for the wiki and the visualisation: it
 reads every node and edge, optionally keeps only the highest-degree nodes, and picks
-up community membership when an analysis pass has stored it. Community data is read
-straight from SQLite (``analysis_communities`` must exist; the member table and its
-columns are discovered with ``PRAGMA table_info``), so this module works with or
-without that pass installed.
+up community membership when the communities pass has stored it
+(``analysis_communities`` joined with ``analysis_community_members``). When those
+tables are absent, for example when the pass was skipped, membership is empty.
 
 Every format renders every node and edge kind generically — kinds are data, not code
 paths. Formats that need both ends of an edge to be declared nodes (GraphML, DOT,
@@ -18,7 +17,6 @@ from __future__ import annotations
 import csv
 import io
 import json
-import sqlite3
 from collections import Counter
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
@@ -32,17 +30,7 @@ FORMAT_ALIASES = {"neo4j": "cypher", "gv": "dot", "md": "mermaid"}
 MERMAID_DEFAULT_CAP = 150
 
 COMMUNITY_TABLE = "analysis_communities"
-_MEMBER_COLUMNS = ("qname", "node_qname", "node", "member", "member_qname")
-_LABEL_COLUMNS = (
-    "community_name",
-    "name",
-    "label",
-    "title",
-    "community_id",
-    "community",
-    "cluster",
-    "id",
-)
+MEMBER_TABLE = "analysis_community_members"
 
 
 class ExportError(ValueError):
@@ -64,52 +52,23 @@ class GraphData:
 # -- loading ---------------------------------------------------------------------
 
 
-def _quote(identifier: str) -> str:
-    return '"' + identifier.replace('"', '""') + '"'
-
-
-def _columns(conn: sqlite3.Connection, table: str) -> list[str]:
-    return [str(r[1]) for r in conn.execute(f"PRAGMA table_info({_quote(table)})").fetchall()]
-
-
 def community_membership(store: GraphStore) -> dict[str, str]:
-    """``qname -> community label`` when an analysis pass stored communities, else ``{}``."""
+    """``qname -> community name`` when the communities pass stored results, else ``{}``."""
     conn = store.connection
-    tables = [
+    present = {
         str(r[0])
         for r in conn.execute(
-            "SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'analysis_communit%' "
-            "ORDER BY name = ? DESC, name",
-            (COMMUNITY_TABLE,),
+            "SELECT name FROM sqlite_master WHERE type='table' AND name IN (?, ?)",
+            (COMMUNITY_TABLE, MEMBER_TABLE),
         ).fetchall()
-    ]
-    if COMMUNITY_TABLE not in tables:
+    }
+    if present != {COMMUNITY_TABLE, MEMBER_TABLE}:
         return {}
-    names = _community_names(conn)
-    for table in tables:
-        columns = _columns(conn, table)
-        member = next((c for c in _MEMBER_COLUMNS if c in columns), None)
-        label = next((c for c in _LABEL_COLUMNS if c in columns and c != member), None)
-        if member is None or label is None:
-            continue
-        rows = conn.execute(f"SELECT {_quote(member)}, {_quote(label)} FROM {_quote(table)}")
-        return {
-            str(qname): names.get(str(value), str(value))
-            for qname, value in rows.fetchall()
-            if qname is not None and value is not None
-        }
-    return {}
-
-
-def _community_names(conn: sqlite3.Connection) -> dict[str, str]:
-    """``id -> name`` from the communities table when membership lives elsewhere."""
-    columns = _columns(conn, COMMUNITY_TABLE)
-    key = next((c for c in ("id", "community_id") if c in columns), None)
-    name = next((c for c in ("name", "label", "title") if c in columns), None)
-    if key is None or name is None or any(c in columns for c in _MEMBER_COLUMNS):
-        return {}
-    rows = conn.execute(f"SELECT {_quote(key)}, {_quote(name)} FROM {_quote(COMMUNITY_TABLE)}")
-    return {str(k): str(v) for k, v in rows.fetchall() if k is not None and v is not None}
+    rows = conn.execute(
+        f"SELECT m.qname, c.name FROM {MEMBER_TABLE} m "
+        f"JOIN {COMMUNITY_TABLE} c ON c.id = m.community_id"
+    ).fetchall()
+    return {str(qname): str(name) for qname, name in rows}
 
 
 def degrees(nodes: Iterable[str], edges: Iterable[Edge]) -> Counter[str]:
